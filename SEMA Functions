@@ -1,0 +1,342 @@
+# In this file all the functions needed by the SEMA algorithm are listed
+# NOTE that we use observation to refer to the level 1 data and 
+# individual to refer to the units at level 2 
+# So the observations are clustered within individuals, 
+# but other groupings are dealt with the equally
+# NOTE 2 these functions are all read in by the SEMA algorithm meaning 
+# that you do not need to worry about transponing certain vectors or matrices, 
+# it has been taken care of in the main function
+
+# updateAverage is the online update of a sample mean
+# input:    the old mean (old), 
+#           new observation (obs), 
+#           the total number of observations (numb_obs).
+# output:   the updated sample mean 
+
+updateAverage <- function(old, obs, numb_obs)
+{
+  return(old+(obs-old)/numb_obs)									
+}														
+#################################
+# updateProduct is the online update of a matrix product
+# input:    the old matrix (old), 
+#           new observation (part_a) 
+#           new observation (part_b)
+# NOTE:     if you want to update the X'X matrix, 
+#           part_a = x, part_b = t(x), where x = rx1 vector 
+#           make sure the dimensions of the vectors of part_a and part_b match to compute the matrix product
+# output:   the updated matrix product
+
+updateProduct <- function(old, part_a, part_b)
+{
+  return(old+part_a%*%part_b)									
+}				
+#################################
+
+# buildTheta_j is a function to create a list with all individual objects
+# in case of a simulation study this function can be used to create all the individual objects at once, 
+# which will be a list with a list for every individual 
+# input:      number of fixed effects (n_fixed)
+#             number of random effects (n_random)
+#             idtag (ids)
+# output:     a list containing the following objects per individual:
+#               idtag (id)
+#               number of observations of this individual (nj, scalar)
+#               square matrix for the fixed effects variables (xsq, matrix)
+#               dependent variable squared (ysq, scalar)
+#               product of fixed effects variables and dependent variable (xy, row vector)
+#               square matrix for the random effects variables (Zsq, matrix)
+#               product of fixed effects and random effects variables (zxmat, dimensions: number of fixed effects x number of random effects)
+#               product of random effects variables and dependent variable (zy, row vector)          
+          
+buildTheta_j <- function(n_fixed, n_random, ids)				
+{
+  return(list(id=ids, nj=0, mu_j=rep(0,n_random),
+               Zsq=matrix(0, nrow=n_random,ncol=n_random),zxmat=matrix(0, nrow=n_fixed,ncol=n_random),
+               Cinv=matrix(NA, nrow=n_random,ncol=n_random), ysq=0, xsq=matrix(0,n_fixed,n_fixed), 
+               xy=rep(0,n_fixed), zy=rep(0,n_random), T1j=rep(0,n_fixed), 
+               T2j=matrix(0, nrow=n_random,ncol=n_random),T3j=0)
+  )  
+}
+
+#################################
+
+# updateId is the online update of all individual level objects 
+# which do not depend on model parameters
+# input:    list of current state of the parameters (idStats) 
+#           fixed effects variables (x)
+#           random effects variables (z)
+#           dependent/outcome variable (y)
+# NOTE:     the default of idStats creates a new list:
+#               idtag (id)
+#               number of observations of this individual (nj, scalar)
+#               square matrix for the fixed effects variables (xsq, matrix)
+#               dependent variable squared (ysq, scalar)
+#               product of fixed effects variables and dependent variable (xy, row vector)
+#               square matrix for the random effects variables (Zsq, matrix)
+#               product of fixed effects and random effects variables (zxmat, dimensions: number of fixed effects x number of random effects)
+#               product of random effects variables and dependent variable (zy, row vector)
+# output:   list with updated objects
+
+updateId <- function(idStats=buildTheta_j(n_fixed, n_random, ids), x, z, y)	
+{
+  idStats$nj		<- idStats$nj+1									         		
+  idStats$xsq		<- updateProduct(old=idStats$xsq, part_a=x, part_b=t(x))			
+  idStats$ysq		<- updateProduct(old=idStats$ysq, part_a=y, part_b=y)		
+  idStats$xy		<- updateProduct(old=idStats$xy,  part_a=y, part_b=x)		
+  idStats$Zsq		<- updateProduct(old=idStats$Zsq, part_a=z, part_b=t(z))		
+  idStats$zxmat	<- updateProduct(old=idStats$zxmat, part_a=x, part_b=t(z))	
+  idStats$zy		<- updateProduct(old=idStats$zy, 	part_a=y, part_b=z)	
+  
+  return(idStats)
+  
+}
+#################################
+# computeC_inv computes the uncertainty of the predicted random effects 
+# NOTE:     this function contains a matrix inversion of the variance of the random effects, 
+#           when this matrix is large, the SEMA algorithm slows down
+# input:    square matrix of the squared random effects variables (Zsq, matrix)
+            residual variance (sigsq, scalar)
+            variance of the random effects (tausq, matrix)
+# output:   updated uncertainty matrix, square matrix of the same size as the number of random effects            
+
+computeC_inv <- function(Zsq, sigsq, tausq)
+{
+  return(solve(Zsq+sigsq*solve(tausq)))
+}
+
+#################################
+# computeMu_j computes the random effects: intercepts and slopes
+# input:    the uncertainty matrix (Cinv)
+#           coefficients of the fixed effects (b)
+#           product of random effects variables and dependent variable (zy)
+#           product of random effects variables and fixed effect variables (zx, matrix)
+# output:   vector with predicted random effects coefficients
+
+computeMu_j<-function(Cinv,b, zy, zx)
+{
+  return(Cinv%*%(t(zy)-t(zx)%*%b))
+}
+#################################
+
+# computeT1j computes the individual contribution to the complete data sufficient statistics 
+# of the fixed effects. 
+# input:    product of the random effects and fixed effects variables (ZX)
+#           predicted random effects coefficients (mu_j)
+# output:   vector of individual contributions to the CDSS of the fixed effects
+
+computeT1j<-function(ZX,mu_j)
+{
+  return(ZX%*%mu_j)
+}
+#################################
+
+# computeT2j computes the individual contribution to the complete data sufficient statistics 
+# of the random effects. 
+# input:    predicted random effects coefficients (mu_j)
+#           residual variance (sigsq)
+#           the uncertainty matrix (Cinv)
+# output:   matrix of individual contributions to the CDSS of the random effects
+
+computeT2j<-function(mu_j, sigsq, Cinv)
+{
+  return(mu_j%*%t(mu_j)+sigsq*Cinv)
+}
+#################################
+
+# computeT3j computes the individual contribution to the complete data sufficient statistics 
+# of the residual variance. 
+# input:    square matrix of squared fixed effects variables (infoxsq)
+#           sum of the squared dependent variable observations (infoysq)
+#           square matrix of squared random effects variables (infozsq)   
+#           product of fixed effects variables and dependent variable (infoxy)
+#           product of random effects variables and dependent variable (infozy)
+#           product of fixed effects variables and random effects variable (infoxz)
+#           predicted random effects coefficients (b_j)
+#           fixed effects coefficients (B)
+#           residual variance (sigsq)
+#           the uncertainty matrix (cinv)
+# output:   matrix of individual contribution to the CDSS of the residual variance (scalar)
+
+computeT3j<-function(infoxsq,infoysq,infozsq,infoxy, infozy, infoxz, bj, B, sigsq, cinv)
+{
+  Bmat	<-B%*%t(B)
+  Bbjmat<-B%*%bj
+  bjmat	<-t(bj)%*%bj
+  return( 
+    infoysq + sum(Bmat*infoxsq) + sum(bjmat*infozsq) -
+      2* sum(t(B)* infoxy)- 2*sum(bj*infozy) + 2*sum(infoxz*Bbjmat) + 
+      sigsq*sum(diag(cinv%*%infozsq))
+  )
+}
+#################################
+# onlineEstep includes the latter three functions, for short hand notation 
+# this function retrieves all the needed information from the global storage and individual storage
+# input:    current state of model parameters (theta_main)
+#           information of the current entering individual 
+# output:   list with contributions and new CDSS, these do still need to be split and returned to the right objects
+
+onlineEstep <- function(theta_main, theta_id)
+{
+  theta_main$T1	<- theta_main$T1-theta_id$T1j
+  theta_id$T1j	<- computeT1j(ZX=theta_id$zxmat, mu_j=theta_id$mu_j)
+  theta_main$T1	<- theta_main$T1+theta_id$T1j
+  
+  theta_main$T2	<- theta_main$T2-theta_id$T2j
+  theta_id$T2j	<- computeT2j(mu_j=theta_id$mu_j, sigsq=theta_main$sigsq_hat, Cinv=theta_id$Cinv )
+  theta_main$T2	<- theta_main$T2+theta_id$T2j
+  
+  theta_main$T3	<- theta_main$T3-theta_id$T3j
+  theta_id$T3j	<- computeT3j(infoxsq=theta_id$xsq,infoysq=theta_id$ysq,infozsq=theta_id$Zsq,
+                             infoxy=theta_id$xy, infozy=theta_id$zy, infoxz=theta_id$zxmat, bj=t(theta_id$mu_j),
+                             B=theta_main$B_hat, sigsq=theta_main$sigsq_hat, cinv=theta_id$Cinv)
+  theta_main$T3	<- theta_main$T3+theta_id$T3j
+  return(list(T1=theta_main$T1, T1j=theta_id$T1j,T2=theta_main$T2, T2j=theta_id$T2j,T3=theta_main$T3, T3j=theta_id$T3j))
+}
+
+#################################
+# createThetaMain creates a storage of all required objects at the global level
+# the function does allow for giving in your own starting values, but this can also be done afterwards
+# if own starting values are given, then this function also needs to have the weight which
+# should be assigned to those starting values, when no starting values are given or included afterwards
+# the function only uses:
+# input:    number of fixed effects (n_fixed)
+            number of random effects (n_random)
+# output:   list which contains:
+#           fixed effects coefficients (B_hat, default start value = 1)
+#           CDSS fixed effects (T1, default start value = 0)
+#           variance random effects (tausq_hat, start value (tausq) default = 1)
+#           CDSS random effects (T2, default start value = 0)
+#           resiudal variance (sigsq_hat, start value (sigsq) default = 1)
+#           CDSS residual variance (T3, default start value = 0)    
+#           number of observations (n)
+#           number of individuals (J)
+#           average dependent variabe (y, I used this for prediction when no info was available, 
+#               but you do not need this one)
+#           square matrix of squared fixed effects (Xsq, summed over all observations, 
+#               needed for computations fixed effects, only needed for as long X'X is not invertible)
+#           product of fixed effects and dependent variable (XYvec, also used for fixed effects coefficients)
+#           inverse of the X'X, whenever that matrix can be inverted, the inverted matrix is updated
+
+createThetaMain <- function(n_fixed, n_random, sigsq=NULL, tausq=NULL, B_hat=NULL,prior_n=NULL,  prior_j=NULL)
+{
+  theta <- list()
+  
+  if(is.null(B_hat))
+  {
+    theta$B_hat	<- rep(1, n_fixed) 
+    theta$T1 	<- rep(0,n_fixed)		# sufficient statistic fixed effect
+  }
+  else
+  {
+    theta$B_hat	<- B_hat
+    theta$T1	<- B_hat*prior_j	
+  }  
+  
+  if(is.null(tausq)) 
+  {
+    theta$tausq_hat	<- matrix(diag(n_random),nrow=n_random, ncol=n_random)	# variance random effects 
+    theta$T2		<- matrix(0,nrow=n_random,ncol=n_random)			# sufficient statistic random effect
+  }
+  else 
+  {
+    theta$tausq_hat	<- tausq
+    theta$T2		<- tausq*prior_j		# sufficient statistic random effect
+  }  
+  
+  if(is.null(sigsq)) 
+  {
+    theta$sigsq_hat	<- 1 							# residual variance
+    theta$T3		<- 1							# sufficient statistic residual variance
+  }
+  else 
+  {
+    theta$sigsq_hat	<- sigsq
+    theta$T3		<- sigsq*prior_n							# sufficient statistic residual variance
+  }
+  
+  theta$n	<- 0							# number of observations in the data stream
+  theta$J	<- 0							# number of units in the data stream
+  
+  theta$y	<- 0
+  theta$Xsq 	<- matrix(0, nrow=n_fixed,ncol=n_fixed)			
+  theta$XYvec	<- rep(0,n_fixed)						
+  theta$Xinv	<- NULL 
+  
+  return(theta)
+}
+#################################
+# trySolve is a function which tries to invert the X'X matrix 
+# input:    square matrix of fixed effects variables squared 
+# output:   if succesful: the inverted matrix
+#           if not succesful: NULL
+
+trySolve <- function(xsquared)
+{
+	tryCatch(solve(xsquared), error = function(e) {return(NULL)}) 
+}
+#################################
+# updateX_inv is the online update function of the inverse matrix 
+# input:    new observation (X, vector)
+#           current inverted matrix 
+# output:   updated inverted matrix 
+
+updateX_inv <- function(X, xinv)
+{
+	return(xinv-((xinv%*%X%*%t(X)%*%xinv)/as.numeric((1+t(X)%*%xinv%*%X))))	#update inverted matrix, pxp
+}
+#################################
+
+# computeBhat computes the coefficients of the fixed effects 
+# input:    inverted matrix of the fixed effects variables (xinv)
+#           product of fixed effects variables and dependent variable (XY)
+#           CDSS of the fixed effects (t1)
+# output:   fixed effects coefficients (vector)
+
+computeBhat <- function(xinv, XY, t1)
+{
+	return(xinv%*%(XY-t1))									#estimation of fixed coefficients 1xp
+}
+#################################
+
+# computeRandomVariance computes the variance of the random effects 
+# input:    CDSS of the random effects (t2)
+#           number of individuals (units)
+# output:   variance of the random effects (matrix)
+
+computeRandomVariance <- function(t2, units)
+{
+	return(t2/units)										
+}
+#################################
+
+# computeResidualVariance computes the residual variance 
+# input:    CDSS of the residual variance (t3)
+#           number of observations (numb_obs)
+# output:   residual variance (scalar)
+
+computeResidualVariance <- function(t3, numb_obs)
+{
+	return(as.numeric(t3/numb_obs))			
+}
+
+#################################
+# semaPredict this function is used in the simulation study to predict, 
+# SEMA function does not need this function to work 
+# input:    current state of model parameters (theta)
+#           what is known about an individual (theta_j)
+#           current observation fixed effects variables (dataFixed)
+#           current observation random effects variables (dataRandom)
+# output:   predicted dependent variable score (scalar) 
+
+semaPredict	<- function(theta, theta_j, dataFixed,dataRandom)
+{
+	if(is.null(theta_j))
+	{	
+		return(theta$y)
+	}
+	else
+	{
+		return(dataFixed%*%theta$B_hat+ dataRandom%*%theta_j$mu_j)
+	}
+}
