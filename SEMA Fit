@@ -1,0 +1,104 @@
+#################################
+## Streaming EM Approximation - multilevel model: fixed and random effects
+## the equation numbers refer to the equations in Raudenbush and Bryk hierarchical linear models, 2nd edition
+## more information on the functions available in SEMA Functions file
+#################################
+
+semaFit <- function(dataFixed, dataRandom, dataY, theta_j=NULL, theta=NULL, ids=id)
+{
+  # dataFixed: new data containing the fixed effect data
+  # dataRandom: new data containing the random data
+  # dataY: new data, dependent variable (1 continuous outcome variable)
+  # theta_j: collection of individual level parameters: nj, xbar, ybar, mu_j, Zsq, zxmat, Cinv, ysq, xsq, xy, zy, T1j,T2j,T3j
+  # theta: B_hat, T1, tausq_hat, T2, sigsq_hat, T3, n, J, Xsq, XYvec  
+  
+  #################################
+  # if theta is not given in the function call, then we create theta here.
+  # create_theta_main can be found in "SEMA Functions", it creates a list with all required parameters:
+  #################################
+  if(is.null(theta))
+  {
+    theta		<- createThetaMain(n_fixed = length(dataFixed), n_random=length(dataRandom))
+  }
+  #################################
+  # if the current observation belongs to someone we haven't seen before, we need to create a new record.
+  # buildTheta_j  creates a list with all required parameters:
+  #################################
+  if(is.null(theta_j))
+  {
+    theta_j	<- buildTheta_j(n_fixed=length(dataFixed), n_random=length(dataRandom), ids=id)
+    theta$J	<- theta$J+1		
+  }
+  
+  #################################
+  # next all the individual level parameters that are only based on the data are updated
+  #################################	
+  
+  theta_j	<- updateId(idStats=theta_j, x=dataFixed, z=dataRandom, y=dataY)
+  
+  #################################
+  # update number of observations
+  # update product of "fixed effects data" and dependent data, we will use this statistic for the computation of the fixed effect coefficients								
+  #################################
+  theta$n 	  <- theta$n+1 
+  theta$XYvec <- theta$XYvec+dataFixed*dataY 
+  theta$y	    <- updateAverage(old=theta$y, obs=dataY, numb_obs=theta$n)		#for prediction purposes only
+  
+  #############################
+  ##prepare E step
+  # compute_c_inv computes the uncertainty of the coefficients of the random effects: (Z'Z + s^2T^(-1))^(-1) (EQUATION 14.15b)
+  # compute_mu_j computes the coefficients of the random effects: C^(-1)((ZY)-(ZX)b) (EQUATION 14.15a)
+  #############################
+  theta_j$Cinv	<- computeC_inv(Zsq=theta_j$Zsq, sigsq=theta$sigsq_hat, tausq=theta$tausq_hat)
+  theta_j$mu_j	<- computeMu_j(Cinv=theta_j$Cinv,b=theta$B_hat, zy=theta_j$zy, zx=theta_j$zxmat)
+  
+  #############################
+  ## E step
+  # online_Estep returns 6 values therefore I assigned it to a temporary object and split it afterwards
+  # see EQUATION 14.23
+  # T1  = sum of all T1j
+  # T1j = XZmu_j
+  # T2  = sum of all T2j
+  # T2j = mu_jmu_j + s^2 C_j^(-1)
+  # T3  = sum of all T3j
+  # T3j = (y-XB-ZB)'(y-XB-ZB) + s^2 tr(C_j^(-1)ZZ)
+  #############################
+  temp 		    <- onlineEstep(theta_main = theta, theta_id = theta_j)  
+  
+  theta$T1	  <- temp$T1
+  theta_j$T1j	<- temp$T1j
+  
+  theta$T2	  <- temp$T2
+  theta_j$T2j	<- temp$T2j
+  
+  theta$T3	  <- temp$T3
+  theta_j$T3j	<- temp$T3j
+  
+  #############################
+  ## M step
+  # the M step cannot be done from the first data point onwards because (X'X)^(-1) cannot be computed in the beginning of the data stream
+  # therefore we first check whether the inverse already exist, 
+  # if it doesnt exist, we try to invert the X'X matrix, if that works we will continue to update the inverted matrix 
+  # if we cannot invert the matrix, no model parameters are computed at this time
+  # update_product
+  # try_solve
+  # update_Xinv:      XX^(-1) = XX^(-1) - (XX^(-1) xx' XX^(-1))/(1+x'XX^(-1)x)
+  # compute_bhat:     Bhat= (XX)^(-1)X'(Y-Zb) (EQUATION 14.10, T1 = X'Zb)
+  # compute_randvar:  tau^2 = mu_jmu_j/J 
+  #############################
+  if(is.null(theta$Xinv))
+  {
+    theta$Xsq	  <- updateProduct(old=theta$Xsq, part_a=dataFixed, part_b=t(dataFixed))			#squared independent data
+    theta$Xinv	<- trySolve(xsquared = theta$Xsq)
+    print("not enough data available to compute model parameters, all sufficient statistics are succesfully updated")
+  }
+  else
+  {
+    theta$Xinv	    <- updateX_inv(X=dataFixed, xinv=theta$Xinv)
+    
+    theta$B_hat		  <- computeBhat(xinv=theta$Xinv,XY=theta$XYvec, t1=theta$T1)
+    theta$tausq_hat	<- computeRandomVariance(t2=theta$T2, units=theta$J)	
+    theta$sigsq_hat	<- computeResidualVariance(t3=theta$T3,numb_obs=theta$n)
+  }
+  return(list(theta_j = theta_j, theta = theta))
+}
